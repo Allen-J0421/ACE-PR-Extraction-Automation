@@ -96,13 +96,30 @@ def main():
         print("ERROR: PR is not merged. merge_commit_sha is missing.")
         sys.exit(1)
 
-    work_dir = "flask"
+    work_dir = f"{repo}"
     if not os.path.isdir(work_dir):
-        print(f"ERROR: '{work_dir}' does not exist.")
-        sys.exit(1)
+        print(f"ERROR: '{work_dir}' does not exist or not in the current directory. ")
+        user_input = input(f"Clone the repository '{work_dir}' at current directory? (y/n)").strip().lower()
+        if user_input == "y":
+            print(f"Cloning repository '{repo_url}' at current directory...")
+            run(f"git clone {repo_url} {work_dir}", cwd=os.getcwd())
+            print(f"cloned successfully.")
+        else:
+            print("Exiting...")
+            sys.exit(1)
 
-    # Create four branches
-    base_sha = run(f"git rev-parse {merge_sha}^1", cwd=work_dir)
+    # Create four branches: use merge-base when merge has two parents (main moved)
+    r = subprocess.run(
+        ["git", "rev-parse", f"{merge_sha}^2"],
+        cwd=work_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        base_sha = run(f"git merge-base {merge_sha}^1 {merge_sha}^2", cwd=work_dir)
+    else:
+        base_sha = run(f"git rev-parse {merge_sha}^1", cwd=work_dir)
     h = base_sha[:8]
     branches = {
         f"{h}-base": base_sha,

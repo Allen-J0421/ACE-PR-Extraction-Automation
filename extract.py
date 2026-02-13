@@ -20,6 +20,8 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
+from params import CREATIVE_PROMPT_SUFFIX
+
 
 def run(cmd, cwd=None):
     """Run a shell command, return stdout. Exit on failure."""
@@ -134,11 +136,7 @@ def main():
     # Build prompts and run Cursor agent on each cursor branch
     body = issue.get("body") or ""
     prompt = f"# Issue #{issue_num}: {issue['title']}\n\n{body}"
-    creative_prompt = prompt + (
-        "\n\n---\n"
-        "Be creative in your solution. Consider innovative, elegant, "
-        "and efficient approaches that go beyond the obvious fix."
-    )
+    creative_prompt = prompt + CREATIVE_PROMPT_SUFFIX
 
     run_cursor_agent(work_dir, f"{h}-cursor", prompt,
                      f"cursor: apply fix for issue #{issue_num}", agent_path)

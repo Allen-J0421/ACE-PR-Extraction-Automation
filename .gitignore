@@ -1,3 +1,11 @@
 __pycache__/
 *.pyc
 .DS_Store
+# Pipeline output
+dataset.jsonl
+pairs.json
+data/
+# Resolve cache (refs + pairs)
+resolve_cache.json
+# Extract cache (root_hash, h per pair)
+extract_cache.json

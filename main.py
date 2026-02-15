@@ -91,22 +91,24 @@ def do_build(args, pairs):
                 continue
             cached = get_extract_entry(extract_cache, issue_id, pr_id)
             if cached:
-                root_hash = cached.get("root_hash")
-                h = cached.get("h")
+                base_hash = cached.get("base_hash")
+                human_hash = cached.get("human_hash")
             else:
-                root_hash = extract_data.get("root_hash")
-                h = extract_data.get("h")
-                if root_hash and h:
+                base_hash = extract_data.get("base_hash")
+                human_hash = extract_data.get("human_hash")
+                branches = extract_data.get("branches", {})
+                if base_hash and human_hash:
                     extract_cache = extract_cache or []
-                    extract_cache.append({"issue_id": issue_id, "pr_id": pr_id, "root_hash": root_hash, "h": h})
+                    extract_cache.append({"issue_id": issue_id, "pr_id": pr_id, "base_hash": base_hash, "human_hash": human_hash, "branches": branches})
                     save_extract_cache(PROJECT_ROOT, extract_cache, cache_dir)
+            h = base_hash[:8] if base_hash else None
             if getattr(args, "cursor", False) and h:
                 agent_err = run_agent_change(repo_url, issue_id, pr_id, h, PROJECT_ROOT)
                 if agent_err:
                     print(f"  agent_change failed: {agent_err}", flush=True)
                     failed.append((issue_id, pr_id, agent_err))
                     continue
-            row, row_err = build_one_row(PROJECT_ROOT, issue_id, pr_id, root_hash, h)
+            row, row_err = build_one_row(PROJECT_ROOT, issue_id, pr_id, base_hash, human_hash)
             if row_err:
                 print(f"  build row failed: {row_err}", flush=True)
                 failed.append((issue_id, pr_id, row_err))
@@ -177,10 +179,11 @@ def main():
                 print(f"  extract failed: {err}", flush=True)
                 failed.append((issue_id, pr_id, err))
                 continue
-            root_hash = extract_data.get("root_hash")
-            h = extract_data.get("h")
-            extract_entries.append({"issue_id": issue_id, "pr_id": pr_id, "root_hash": root_hash, "h": h})
-            print("  ok", flush=True)
+            base_hash = extract_data.get("base_hash")
+            human_hash = extract_data.get("human_hash")
+            branches = extract_data.get("branches", {})
+            extract_entries.append({"issue_id": issue_id, "pr_id": pr_id, "base_hash": base_hash, "human_hash": human_hash, "branches": branches})
+            print("Extract Success", flush=True)
         save_extract_cache(PROJECT_ROOT, extract_entries, cache_dir)
         print(f"Wrote {get_extract_cache_path(PROJECT_ROOT, cache_dir)}. Failed: {len(failed)}")
         if failed:
@@ -219,18 +222,17 @@ def main():
         for row in rows:
             issue_id = row.get("issue_id")
             pr_id = row.get("pr_id")
-            root_hash = row.get("root_hash")
-            if issue_id is None or pr_id is None or not root_hash:
+            base_hash = row.get("base_hash")
+            human_hash = row.get("human_hash")
+            if issue_id is None or pr_id is None or not base_hash:
                 continue
-            h = root_hash[:8]
+            h = base_hash[:8]
             if cursor_branches_exist(work_dir, h):
-                has_cursor.append((row, issue_id, pr_id, root_hash, h))
+                has_cursor.append((row, issue_id, pr_id, base_hash, human_hash, h))
             else:
-                no_cursor.append((row, issue_id, pr_id, root_hash, h))
+                no_cursor.append((row, issue_id, pr_id, base_hash, human_hash, h))
         if not no_cursor and not has_cursor:
-            no_cursor = [(row, row.get("issue_id"), row.get("pr_id"), (row.get("root_hash") or "")[:8] and row.get("root_hash"), (row.get("root_hash") or "")[:8]) for row in rows if row.get("issue_id") is not None and row.get("pr_id") is not None and row.get("root_hash")]
-            if not no_cursor:
-                no_cursor = [(row, row.get("issue_id"), row.get("pr_id"), row.get("root_hash"), (row.get("root_hash") or "")[:8]) for row in rows]
+            no_cursor = [(row, row.get("issue_id"), row.get("pr_id"), row.get("base_hash"), row.get("human_hash"), (row.get("base_hash") or "")[:8]) for row in rows if row.get("issue_id") is not None and row.get("pr_id") is not None and row.get("base_hash")]
         if len(has_cursor) == len(rows) and has_cursor:
             print("Cursor changes already applied for all pairs.")
             sys.exit(0)
@@ -249,13 +251,13 @@ def main():
         if getattr(args, "limit", None) is not None:
             to_apply = to_apply[: args.limit]
         repo_url = REPO_URL
-        for row, issue_id, pr_id, root_hash, h in to_apply:
+        for row, issue_id, pr_id, base_hash, human_hash, h in to_apply:
             print(f"Applying cursor: issue={issue_id} pr={pr_id} ...", flush=True)
             agent_err = run_agent_change(repo_url, issue_id, pr_id, h, PROJECT_ROOT)
             if agent_err:
                 print(f"  agent_change failed: {agent_err}", flush=True)
                 continue
-            new_row, row_err = build_one_row(PROJECT_ROOT, issue_id, pr_id, root_hash, h)
+            new_row, row_err = build_one_row(PROJECT_ROOT, issue_id, pr_id, base_hash, human_hash)
             if row_err:
                 print(f"  build row failed: {row_err}", flush=True)
                 continue

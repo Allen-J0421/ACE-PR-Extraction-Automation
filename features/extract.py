@@ -76,17 +76,27 @@ def main():
     work_dir = f"{repo}"
     if not os.path.isdir(work_dir):
         if autoc:
-            print(f"Cloning {repo_url} → {work_dir}/ …",
+            print(f"Cloning --no-single-branch {repo_url} → {work_dir}/ …",
                   file=sys.stderr, flush=True)
+            # Full clone (no --depth) so merge commit and parents are available.
             run(f"git clone {repo_url} {work_dir}", cwd=os.getcwd())
             print("Clone OK.", file=sys.stderr, flush=True)
         else:
             print(f"'{work_dir}/' not found.")
             ans = input(f"Clone {repo_url}? (y/n) ").strip().lower()
             if ans == "y":
-                run(f"git clone {repo_url} {work_dir}", cwd=os.getcwd())
+                run(f"git clone --no-single-branch {repo_url} {work_dir}", cwd=os.getcwd())
             else:
                 _error("clone declined by user")
+
+    # Verify merge commit exists locally (clone is full, so if it's missing the
+    # commit was force-pushed away or GC'd — no recovery possible).
+    r = subprocess.run(
+        ["git", "rev-parse", "-q", "--verify", f"{merge_sha}^{{commit}}"],
+        cwd=work_dir, capture_output=True, check=False,
+    )
+    if r.returncode != 0:
+        _error(f"Merge commit {merge_sha} not reachable in clone (PR #{pr_num})")
 
     # Create two branches only (base and human). Cursor branches are created in agent_change.py.
     r = subprocess.run(
@@ -112,20 +122,19 @@ def main():
     # Return to base branch when done
     run(f"git checkout {h}-base", cwd=work_dir)
 
-    # Output: branch name → commit hash for each branch
     result = {}
     for name in branches:
         sha = run(f"git rev-parse {name}", cwd=work_dir)
         result[name] = sha
     if out_json:
         machine = {
-            "root_hash": base_sha,
-            "h": h,
+            "base_hash": base_sha,
+            "human_hash": merge_sha,
             "branches": result,
         }
         print("EXTRACT_JSON=" + json.dumps(machine))
     else:
-        print(json.dumps(result, indent=2))
+        print(json.dumps({"base_hash": base_sha, "human_hash": merge_sha, "branches": result}))
 
 
 if __name__ == "__main__":

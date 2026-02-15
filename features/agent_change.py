@@ -40,7 +40,7 @@ def run_cursor_agent(work_dir, branch, prompt, commit_msg, agent_path):
     print(f"--- Running Cursor agent on {branch} ---", file=sys.stderr, flush=True)
     run(f"git switch {branch}", cwd=work_dir)
     r = subprocess.run(
-        [agent_path, "-p", prompt],
+        [agent_path, "--trust", "-p", prompt],
         cwd=work_dir,
         capture_output=True,
         text=True,

@@ -22,8 +22,14 @@ from params import GITHUB_OWNER, GITHUB_REPO
 OWNER = GITHUB_OWNER
 REPO = GITHUB_REPO
 WORK_DIR = GITHUB_REPO
+CACHE_DIR_NAME = f"{REPO}_cache"
 RESOLVE_CACHE_FILENAME = "resolve_cache.json"
 EXTRACT_CACHE_FILENAME = "extract_cache.json"
+
+
+def get_cache_dir(project_root, cache_dir=None):
+    """Directory for resolve and extract cache files. cache_dir overrides default project_root/<repo>_cache."""
+    return os.path.normpath(cache_dir or os.path.join(project_root, CACHE_DIR_NAME))
 
 
 def run(cmd, cwd=None, capture=True):
@@ -50,13 +56,13 @@ def load_pairs(pairs_path):
     return data.get("pairs", data.get("issue_pr_pairs", []))
 
 
-def get_cache_path(project_root):
-    return os.path.join(project_root, RESOLVE_CACHE_FILENAME)
+def get_cache_path(project_root, cache_dir=None):
+    return os.path.join(get_cache_dir(project_root, cache_dir), RESOLVE_CACHE_FILENAME)
 
 
-def _load_cache(project_root):
+def _load_cache(project_root, cache_dir=None):
     """Load full cache file. Returns dict with refs and pairs or None if missing/invalid."""
-    path = get_cache_path(project_root)
+    path = get_cache_path(project_root, cache_dir)
     if not os.path.isfile(path):
         return None
     try:
@@ -69,46 +75,53 @@ def _load_cache(project_root):
     return data
 
 
-def load_pairs_from_cache(project_root):
+def load_pairs_from_cache(project_root, cache_dir=None):
     """Load pairs from resolve cache file. Returns list of {issue_id, pr_id} or None if missing/invalid."""
-    data = _load_cache(project_root)
+    data = _load_cache(project_root, cache_dir)
     return data["pairs"] if data else None
 
 
-def load_refs_from_cache(project_root):
+def load_refs_from_cache(project_root, cache_dir=None):
     """Load refs from resolve cache file. Returns dict with issue_ids, pr_ids, ghsa_ids or None if missing/invalid."""
-    data = _load_cache(project_root)
+    data = _load_cache(project_root, cache_dir)
     return data.get("refs") if data else None
 
 
-def get_pairs_from_resolve(project_root):
-    """Get pairs: from cache if it exists, else run resolve_pairs with --cache then load from cache."""
-    pairs = load_pairs_from_cache(project_root)
+def get_pairs_from_resolve(project_root, cache_dir=None):
+    """Get pairs: from cache if it exists, else run resolve_pairs with --cache <dir> then load from cache."""
+    pairs = load_pairs_from_cache(project_root, cache_dir)
     if pairs is not None:
+        cache_path = get_cache_path(project_root, cache_dir)
+        print(f"--- Loaded pairs from cache: {cache_path} ({len(pairs)} pairs) ---", file=sys.stderr, flush=True)
         return pairs
+    print("--- No resolve cache found; running resolve_pairs... ---", file=sys.stderr, flush=True)
+    cache_dir_path = get_cache_dir(project_root, cache_dir)
     script = os.path.join(project_root, "features", "resolve_pairs.py")
-    cache_path = get_cache_path(project_root)
     if not os.path.isfile(script):
         raise RuntimeError(f"resolve_pairs.py not found at {script}")
-    code, out, err = run(
-        f'python3 "{script}" --json --cache "{cache_path}"',
+    r = subprocess.run(
+        [sys.executable, script, "--json", "--cache", cache_dir_path],
         cwd=project_root,
+        stdout=subprocess.PIPE,
+        stderr=None,
+        text=True,
     )
-    if code != 0:
-        raise RuntimeError(f"resolve_pairs failed: {err}")
-    pairs = load_pairs_from_cache(project_root)
+    if r.returncode != 0:
+        raise RuntimeError("resolve_pairs failed")
+    pairs = load_pairs_from_cache(project_root, cache_dir)
+    print(f"--- Resolve complete; loaded {len(pairs) if pairs else 0} pairs from cache ---", file=sys.stderr, flush=True)
     if pairs is None:
-        raise RuntimeError(f"resolve_cache not created at {cache_path}")
+        raise RuntimeError(f"resolve_cache not created in {cache_dir_path}")
     return pairs
 
 
-def get_extract_cache_path(project_root):
-    return os.path.join(project_root, EXTRACT_CACHE_FILENAME)
+def get_extract_cache_path(project_root, cache_dir=None):
+    return os.path.join(get_cache_dir(project_root, cache_dir), EXTRACT_CACHE_FILENAME)
 
 
-def load_extract_cache(project_root):
+def load_extract_cache(project_root, cache_dir=None):
     """Load extract cache. Returns list of {issue_id, pr_id, root_hash, h} or None if missing/invalid."""
-    path = get_extract_cache_path(project_root)
+    path = get_extract_cache_path(project_root, cache_dir)
     if not os.path.isfile(path):
         return None
     try:
@@ -121,9 +134,10 @@ def load_extract_cache(project_root):
     return data
 
 
-def save_extract_cache(project_root, entries):
+def save_extract_cache(project_root, entries, cache_dir=None):
     """Write extract cache. entries: list of {issue_id, pr_id, root_hash, h}."""
-    path = get_extract_cache_path(project_root)
+    path = get_extract_cache_path(project_root, cache_dir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump(entries, f, indent=2)
 
@@ -214,9 +228,11 @@ def main():
     args = ap.parse_args()
 
     project_root = os.path.abspath(args.project_root)
+    print("--- Loading pairs from file... ---", file=sys.stderr, flush=True)
     pairs = load_pairs(args.pairs)
     if args.limit is not None:
         pairs = pairs[: args.limit]
+    print(f"--- Building dataset rows ({len(pairs)} pairs) -> {args.output} ---", file=sys.stderr, flush=True)
     failed = []
     with open(args.output, "w") as out:
         for i, p in enumerate(pairs):
@@ -230,22 +246,22 @@ def main():
             if not root_hash or not h:
                 failed.append((issue_id, pr_id, "missing root_hash or h (run extract first)"))
                 continue
-            print(f"[{i+1}/{len(pairs)}] issue={issue_id} pr={pr_id} ...", flush=True)
+            print(f"[{i+1}/{len(pairs)}] issue={issue_id} pr={pr_id} ...", file=sys.stderr, flush=True)
             row, row_err = build_one_row(project_root, issue_id, pr_id, root_hash, h)
             if row_err:
-                print(f"  build row failed: {row_err}", flush=True)
+                print(f"  build row failed: {row_err}", file=sys.stderr, flush=True)
                 failed.append((issue_id, pr_id, row_err))
                 continue
             out.write(json.dumps(row, ensure_ascii=False) + "\n")
             out.flush()
-            print("  ok", flush=True)
+            print("  ok", file=sys.stderr, flush=True)
 
-    print(f"Wrote {args.output}. Failed: {len(failed)}")
+    print(f"--- Wrote {args.output}. Failed: {len(failed)} ---", file=sys.stderr, flush=True)
     if failed:
         for issue_id, pr_id, err in failed[:20]:
-            print(f"  issue={issue_id} pr={pr_id}: {err}")
+            print(f"  issue={issue_id} pr={pr_id}: {err}", file=sys.stderr)
         if len(failed) > 20:
-            print(f"  ... and {len(failed) - 20} more")
+            print(f"  ... and {len(failed) - 20} more", file=sys.stderr)
 
 
 if __name__ == "__main__":

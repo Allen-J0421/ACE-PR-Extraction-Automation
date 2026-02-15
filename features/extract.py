@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 PR Extraction Automation
-Usage: python features/extract.py <owner/repo> <issue_number> <pr_number> [--json] [--autoc]
+Usage: python features/extract.py <repo_url> <issue_number> <pr_number> [--json] [--autoc]
+  repo_url  e.g. https://github.com/owner/repo
 
   --json   Print one line of machine-readable JSON at the end: root_hash, h (prefix), branches.
   --autoc  Non-interactive: clone repo if missing without prompting.
@@ -20,12 +21,20 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
+
+def _error(msg):
+    """Print an error prefixed with EXTRACT_ERROR= (machine-readable on stdout)
+    and also to stderr for human visibility, then exit."""
+    print(f"EXTRACT_ERROR={msg}")
+    print(f"ERROR: {msg}", file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
 def run(cmd, cwd=None):
     """Run a shell command, return stdout. Exit on failure."""
     r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True)
     if r.returncode != 0:
-        print(f"FAILED: {cmd}\n{r.stderr}")
-        sys.exit(1)
+        _error(f"cmd failed: {cmd} — {r.stderr.strip()}")
     return r.stdout.strip()
 
 
@@ -42,7 +51,7 @@ def main():
         sys.exit(1)
 
     repo_url = pos[0]
-    path = urlparse(repo_url).path.strip("/")   # "owner/repo"
+    path = urlparse(repo_url).path.strip("/")
     owner, repo = path.split("/", 1)
     issue_num = int(pos[1])
     pr_num = int(pos[2])
@@ -53,37 +62,31 @@ def main():
     try:
         pr = gh(f"repos/{owner}/{repo}/pulls/{pr_num}")
     except Exception as e:
-        print(f"ERROR: Failed to fetch PR: {e}")
-        sys.exit(1)
-    
+        _error(f"Failed to fetch PR #{pr_num}: {e}")
+
     try:
         issue = gh(f"repos/{owner}/{repo}/issues/{issue_num}")
     except Exception as e:
-        print(f"ERROR: Failed to fetch issue: {e}")
-        sys.exit(1)
-
+        _error(f"Failed to fetch issue #{issue_num}: {e}")
 
     merge_sha = pr.get("merge_commit_sha")
     if not merge_sha:
-        print("ERROR: PR is not merged. merge_commit_sha is missing.")
-        sys.exit(1)
+        _error(f"PR #{pr_num} has no merge_commit_sha (not merged?)")
 
     work_dir = f"{repo}"
     if not os.path.isdir(work_dir):
         if autoc:
-            print(f"Cloning repository '{repo_url}' at current directory...")
+            print(f"Cloning {repo_url} → {work_dir}/ …",
+                  file=sys.stderr, flush=True)
             run(f"git clone {repo_url} {work_dir}", cwd=os.getcwd())
-            print("cloned successfully.")
+            print("Clone OK.", file=sys.stderr, flush=True)
         else:
-            print(f"ERROR: '{work_dir}' does not exist or not in the current directory. ")
-            user_input = input(f"Clone the repository '{work_dir}' at current directory? (y/n)").strip().lower()
-            if user_input == "y":
-                print(f"Cloning repository '{repo_url}' at current directory...")
+            print(f"'{work_dir}/' not found.")
+            ans = input(f"Clone {repo_url}? (y/n) ").strip().lower()
+            if ans == "y":
                 run(f"git clone {repo_url} {work_dir}", cwd=os.getcwd())
-                print(f"cloned successfully.")
             else:
-                print("Exiting...")
-                sys.exit(1)
+                _error("clone declined by user")
 
     # Create two branches only (base and human). Cursor branches are created in agent_change.py.
     r = subprocess.run(
@@ -104,7 +107,7 @@ def main():
     }
     for name, sha in branches.items():
         run(f"git branch {name} {sha}", cwd=work_dir)
-    print("--- branches created (base, human) ---")
+    print("--- branches created (base, human) ---", file=sys.stderr, flush=True)
 
     # Return to base branch when done
     run(f"git checkout {h}-base", cwd=work_dir)

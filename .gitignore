@@ -5,7 +5,5 @@ __pycache__/
 dataset.jsonl
 pairs.json
 data/
-# Resolve cache (refs + pairs)
-resolve_cache.json
-# Extract cache (root_hash, h per pair)
-extract_cache.json
+# Cache directory (resolve_cache.json + extract_cache.json; default: <reponame>_cache/)
+*_cache/

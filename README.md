@@ -7,16 +7,16 @@
 
 ## Concepts
 
-- **Refs** = A full list of issue numbers, PR numbers, and GHSA IDs from the designated repo in `params.py`. eg.[Flask stable changelog](https://flask.palletsprojects.com/en/stable/changes/).
-- **Pairs** = Paired issue number and corresponding pr that resolved it `(issue_id, pr_id)` from refs, matched using `features/resolve_pairs.py` via GitHub API (e.g. “Fixes #N” in PR body, or issue timeline).
-- **params.py** = config: `CREATIVE_PROMPT_SUFFIX`, `CHANGELOG_URL`, `GITHUB_OWNER`, `GITHUB_REPO`, regex patterns.
+- **Refs** = Issue and PR IDs derived from the repo in `params.py` (GITHUB_OWNER, GITHUB_REPO), via a single batched GraphQL query for merged PRs and their closing-issue references.
+- **Pairs** = `(issue_id, pr_id)` built from merged PRs' `closingIssuesReferences` in `features/resolve_pairs.py` (no changelog parsing).
+- **params.py** = config: `CREATIVE_PROMPT_SUFFIX`, `GITHUB_OWNER`, `GITHUB_REPO`.
 
 # Single entry — main.py
 
 Use **main.py** as the single entry point. It is the high-level controller. Run from **project root**.
 
-1. **resolve** — calls `features/resolve_pairs.py` to parse the changelog and find (issue_id, pr_id) pairs. Writes **resolve_cache.json** (refs + pairs). If you run **extract** or **build** without a prior resolve, resolve runs automatically when the cache is missing.
-2. **extract** — runs extract only for each pair (from resolve cache or `--pairs`), writes **extract_cache.json** (root_hash, h per pair). No agent_change, no build.
+1. **resolve** — calls `features/resolve_pairs.py` to fetch merged PRs via GraphQL and build (issue_id, pr_id) pairs from closing-issue references. Writes **resolve_cache.json** and **pairs.json** in the cache directory (default: **&lt;reponame&gt;_cache/**). Use **--refresh** to force re-fetch. If you run **extract** or **build** without a prior resolve, resolve runs automatically when the cache is missing.
+2. **extract** — runs extract only for each pair. Pairs are loaded from the resolve cache in the cache directory; if the cache is missing, resolve is run first. Writes **extract_cache.json** in the same directory. No agent_change, no build.
 3. **build** — for each pair: run extract (to set repo branches), then agent_change (if `--cursor`), then build_one_row. Uses extract cache for root_hash/h when present.
 4. **all** — load pairs (from resolve cache or run resolve), then same as build. Without `--cursor`, produces a dataset with empty `cursor_diff` / `cursor_creative_diff`.
 5. **apply-cursor** — use after **all** (no `--cursor`). Reads existing dataset, checks which pairs already have cursor branches; applies agent_change + build_one_row only to those that don’t, and updates the dataset rows in place (no extract).
@@ -24,9 +24,9 @@ Use **main.py** as the single entry point. It is the high-level controller. Run 
 ## Pipeline flow
 
 ```
-resolve   →  pairs [(issue_id, pr_id), ...]  →  resolve_cache.json
+resolve   →  pairs [(issue_id, pr_id), ...]  →  <reponame>_cache/resolve_cache.json
     ↓
-extract   →  (optional) run extract per pair  →  extract_cache.json
+extract   →  (optional) run extract per pair, creates -base, -human branches  →  <reponame>_cache/extract_cache.json
     ↓
 build     →  per pair: extract → [agent_change if --cursor] → build_one_row  →  dataset.jsonl
     ↓
@@ -35,29 +35,29 @@ apply-cursor  →  (if dataset exists, no --cursor was used) apply agent_change 
 
 **Branches:** `features/extract.py` creates only `{h}-base` and `{h}-human`. `features/agent_change.py` creates `{h}-cursor` and `{h}-cursor-creative` from base, then runs the Cursor agent on each.
 
-**Resolve cache:** Running **resolve** writes `resolve_cache.json` in the project root with two entries: `refs` (full list: `issue_ids`, `pr_ids`, `ghsa_ids`) and `pairs` (array of `{issue_id, pr_id}`). **build** (without `--pairs`) and **all** load pairs from this file if it exists; if not, they run resolve first to create it, then load. This avoids re-fetching the changelog and re-resolving on every run.
+**Cache directory:** By default, cache files are stored in **&lt;reponame&gt;_cache/** (e.g. `flask_cache/`) in the project root: `resolve_cache.json` (refs + pairs) and `extract_cache.json` (root_hash, h per pair). Override with **--cache-dir DIR** (main.py) or **--cache DIR** (resolve_pairs.py). **extract**, **build**, and **all** load pairs from the resolve cache if it exists; if not, they run resolve first to create it, then load.
 
 ## Subcommands
 
 | Subcommand | What it does | What it runs | Options | Output |
 |------------|---------------|--------------|---------|--------|
-| **resolve** | Parse changelog and resolve to (issue_id, pr_id) pairs | `features/resolve_pairs.py --json` | `--out pairs.json` | Pairs JSON, resolve_cache.json |
-| **extract** | Run extract only for each pair, fill extract cache | Load pairs (cache or resolve) → extract per pair | `--pairs`, `--out`, `--limit N` | extract_cache.json |
-| **build** | For each pair: extract → agent (if --cursor) → build one row | Load pairs → extract → agent_change (if `--cursor`) → build_one_row per pair | `--cursor`, `--pairs`, `--out dataset.jsonl`, `--limit N` | JSONL file |
-| **all** | Resolve (if needed) then build dataset | Load pairs → same as build | `--cursor`, `--out dataset.jsonl`, `--limit N` | JSONL file |
-| **apply-cursor** | Create cursor branches and apply changes to dataset  | Read dataset → check cursor branches → agent_change + build_one_row for pairs that need it, update rows | `--out dataset.jsonl`, `--limit N` | Updated dataset |
+| **resolve** | Fetch merged PRs via GraphQL, build (issue_id, pr_id) pairs | `features/resolve_pairs.py --json --cache DIR` | `--cache-dir DIR`, `--refresh` | &lt;reponame&gt;_cache/resolve_cache.json, pairs.json |
+| **extract** | Run extract only for each pair, create branches and fill extract cache | Pairs from cache (run resolve if missing) → extract per pair | `--limit N`, `--cache-dir DIR` | &lt;reponame&gt;_cache/extract_cache.json |
+| **build** | For each pair: extract → agent (if --cursor) → build one row | Pairs from cache (run resolve if missing) → extract → agent_change (if `--cursor`) → build_one_row | `--cursor`, `--limit N`, `--cache-dir DIR` | dataset.jsonl |
+| **all** | Resolve (if needed) then build dataset | Load pairs → same as build | `--cursor`, `--limit N` | dataset.jsonl |
+| **apply-cursor** | Create cursor branches and apply changes to dataset  | Read dataset → check cursor branches → agent_change + build_one_row for pairs that need it, update rows | `--limit N` | dataset.jsonl (updated) |
 
 - Note: Use `apply-cursor` subcommand ONLY if dataset has been created and -human-base branches exists! ie. seperate cursor changes with dataset creation)
 
 ## Examples
 
 ```bash
-python main.py resolve --out pairs.json
+python main.py resolve
 python main.py extract --limit 5
-python main.py build --cursor --pairs pairs.json --out dataset.jsonl --limit 5
-python main.py build --cursor --out dataset.jsonl --limit 5
-python main.py all --out dataset.jsonl --limit 5
-python main.py apply-cursor --out dataset.jsonl
+python main.py build --cursor --limit 5
+python main.py build --cursor --limit 5
+python main.py all --limit 5
+python main.py apply-cursor
 ```
 
 **Dataset output:** Each line has `project`, `issue_text`, `issue_id`, `pr_text`, `pr_id`, `root_hash`, `pr_diff`, `cursor_diff`, `cursor_creative_diff`. Use `--cursor` to populate the cursor diffs; without it they are empty. With `--cursor`, one extract + one agent_change per pair (can take hours). Use `--limit` for testing. Failed pairs are skipped and reported.
@@ -73,15 +73,15 @@ Standalone usage for each script in **features/** (run from **project root** unl
 Changelog → refs and/or pairs (fetch changelog, optionally resolve via GitHub API).
 
 ```bash
-python features/resolve_pairs.py [--json] [--refs-only] [--cache PATH]
+python features/resolve_pairs.py [--json] [--refs-only] [--cache DIR]
 ```
 
 - No flags — pairs, print one `issue_id pr_id` per line.
 - `--json` — pairs as JSON array, or (with `--refs-only`) refs as JSON.
 - `--refs-only` — output refs only (issue_ids, pr_ids, ghsa_ids); no pairing.
-- `--cache PATH` — write a single JSON file with `refs` and `pairs` (default path: resolve_cache.json in current directory). build/all load from this cache when no `--pairs` file is given.
+- `--cache DIR` — directory for cache files (default: cwd/&lt;reponame&gt;_cache). Resolve writes `resolve_cache.json` there; extract writes `extract_cache.json` there. main.py uses **--cache-dir DIR** for the same folder.
 
-Save pairs: `python features/resolve_pairs.py --json > pairs.json`. With cache: `python features/resolve_pairs.py --json --cache resolve_cache.json`
+Save pairs: `python features/resolve_pairs.py --json > pairs.json`. Custom cache dir: `python features/resolve_pairs.py --json --cache ./my_cache`
 
 ## features/extract.py
 

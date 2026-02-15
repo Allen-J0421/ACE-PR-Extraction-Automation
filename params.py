@@ -6,13 +6,7 @@ CREATIVE_PROMPT_SUFFIX = (
     "and efficient approaches that go beyond the obvious fix."
 )
 
-# --- resolve_pairs.py: changelog and GitHub repo ---
-CHANGELOG_URL = "https://flask.palletsprojects.com/en/stable/changes/"
+# --- resolve_pairs.py: GitHub repo (single source of truth via GraphQL) ---
+REPO_URL = "https://github.com/pallets/flask"
 GITHUB_OWNER = "pallets"
 GITHUB_REPO = "flask"
-
-# Regex patterns for changelog parsing (issue/PR/GHSA links and "Fixes #N" in PR body)
-RE_ISSUE_PATTERN = r"(?:github\.com/pallets/flask/issues/|#)(\d+)"
-RE_PULL_PATTERN = r"github\.com/pallets/flask/pull/(\d+)"
-RE_GHSA_PATTERN = r"flask/security/advisories/(GHSA-[a-zA-Z0-9-]+)"
-RE_FIXES_PATTERN = r"(?i)(?:fixes|closes|resolves)\s+#(\d+)"

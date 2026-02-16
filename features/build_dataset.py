@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Build JSONL dataset from (issue_id, pr_id) pairs using precomputed base_hash and human_hash.
+Build JSONL dataset from (issue_id, pr_id) pairs using precomputed base_hash and merge_hash.
 Does not run extract.py or agent_change.py; main.py runs those and then calls this.
 Usage (standalone): python features/build_dataset.py --pairs state.json [--output dataset.jsonl] [--limit N]
-  state.json: array of {"issue_id": N, "pr_id": M, "base_hash": "...", "human_hash": "..."}.
+  state.json: array of {"issue_id": N, "pr_id": M, "base_hash": "...", "merge_hash": "..."}.
 Requires: gh. Run from project root.
 """
 
@@ -120,7 +120,7 @@ def get_extract_cache_path(project_root, cache_dir=None):
 
 
 def load_extract_cache(project_root, cache_dir=None):
-    """Load extract cache. Returns list of {issue_id, pr_id, base_hash, human_hash, merge_hash} or None if missing/invalid."""
+    """Load extract cache. Returns list of {issue_id, pr_id, base_hash, merge_hash, branches} or None if missing/invalid."""
     path = get_extract_cache_path(project_root, cache_dir)
     if not os.path.isfile(path):
         return None
@@ -135,21 +135,11 @@ def load_extract_cache(project_root, cache_dir=None):
 
 
 def save_extract_cache(project_root, entries, cache_dir=None):
-    """Write extract cache. entries: list of {issue_id, pr_id, base_hash, human_hash, merge_hash}."""
+    """Write extract cache. entries: list of {issue_id, pr_id, base_hash, merge_hash, branches}."""
     path = get_extract_cache_path(project_root, cache_dir)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump(entries, f, indent=2)
-
-
-def get_extract_entry(cache, issue_id, pr_id):
-    """Return {base_hash, human_hash, merge_hash} for (issue_id, pr_id) from cache, or None."""
-    if not cache:
-        return None
-    for e in cache:
-        if e.get("issue_id") == issue_id and e.get("pr_id") == pr_id:
-            return {"base_hash": e.get("base_hash"), "human_hash": e.get("human_hash"), "merge_hash": e.get("merge_hash")}
-    return None
 
 
 def cursor_branches_exist(work_dir, h):
@@ -190,13 +180,13 @@ def fetch_pr_text(pr_id):
         return ""
 
 
-def build_one_row(project_root, issue_id, pr_id, base_hash, human_hash):
+def build_one_row(project_root, issue_id, pr_id, base_hash, merge_hash):
     """Build one JSONL row from repo state."""
     work_dir = os.path.join(project_root, WORK_DIR)
     if not os.path.isdir(work_dir):
         return None, "repo not found"
-    if not base_hash or not human_hash:
-        return None, "missing base_hash or human_hash"
+    if not base_hash or not merge_hash:
+        return None, "missing base_hash or merge_hash"
     h = base_hash[:8]
     human_ref = f"{h}-human"
     cursor_ref = f"{h}-cursor"
@@ -212,8 +202,9 @@ def build_one_row(project_root, issue_id, pr_id, base_hash, human_hash):
         "issue_id": issue_id,
         "pr_text": pr_text,
         "pr_id": pr_id,
+        "root_hash": base_hash,
         "base_hash": base_hash,
-        "human_hash": human_hash,
+        "merge_hash": merge_hash,
         "pr_diff": pr_diff,
         "cursor_diff": cursor_diff,
         "cursor_creative_diff": cursor_creative_diff,
@@ -222,8 +213,8 @@ def build_one_row(project_root, issue_id, pr_id, base_hash, human_hash):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Build JSONL dataset from state (pairs with base_hash, human_hash).")
-    ap.add_argument("--pairs", required=True, help="JSON file with list of {issue_id, pr_id, base_hash, human_hash}")
+    ap = argparse.ArgumentParser(description="Build JSONL dataset from state (pairs with base_hash, merge_hash).")
+    ap.add_argument("--pairs", required=True, help="JSON file with list of {issue_id, pr_id, base_hash, merge_hash}")
     ap.add_argument("--output", default="dataset.jsonl", help="Output JSONL path")
     ap.add_argument("--limit", type=int, default=None, help="Max number of pairs to process")
     ap.add_argument("--project-root", default=os.getcwd(), help="Project root")
@@ -241,15 +232,15 @@ def main():
             issue_id = p.get("issue_id")
             pr_id = p.get("pr_id")
             base_hash = p.get("base_hash")
-            human_hash = p.get("human_hash")
+            merge_hash = p.get("merge_hash") or p.get("human_hash")
             if issue_id is None or pr_id is None:
                 failed.append((issue_id, pr_id, "missing issue_id or pr_id"))
                 continue
-            if not base_hash or not human_hash:
-                failed.append((issue_id, pr_id, "missing base_hash or human_hash (run extract first)"))
+            if not base_hash or not merge_hash:
+                failed.append((issue_id, pr_id, "missing base_hash or merge_hash (run extract first)"))
                 continue
             print(f"[{i+1}/{len(pairs)}] issue={issue_id} pr={pr_id} ...", file=sys.stderr, flush=True)
-            row, row_err = build_one_row(project_root, issue_id, pr_id, base_hash, human_hash)
+            row, row_err = build_one_row(project_root, issue_id, pr_id, base_hash, merge_hash)
             if row_err:
                 print(f"  build row failed: {row_err}", file=sys.stderr, flush=True)
                 failed.append((issue_id, pr_id, row_err))

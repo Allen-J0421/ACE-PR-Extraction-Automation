@@ -129,12 +129,12 @@ def main():
     if out_json:
         machine = {
             "base_hash": base_sha,
-            "human_hash": merge_sha,
+            "merge_hash": merge_sha,
             "branches": result,
         }
         print("EXTRACT_JSON=" + json.dumps(machine))
     else:
-        print(json.dumps({"base_hash": base_sha, "human_hash": merge_sha, "branches": result}))
+        print(json.dumps({"base_hash": base_sha, "merge_hash": merge_sha, "branches": result}))
 
 
 if __name__ == "__main__":

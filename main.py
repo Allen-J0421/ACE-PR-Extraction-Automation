@@ -2,11 +2,11 @@
 """
 Single entrypoint for the Flask changelog dataset pipeline.
 Usage:
-  python main.py resolve
-  python main.py extract [--limit N]   # run extract only; pairs from cache or run resolve
-  python main.py build [--cursor] [--limit N]  # writes dataset.jsonl; pairs from cache or run resolve
-  python main.py all [--cursor] [--limit N]    # writes dataset.jsonl
-  python main.py apply-cursor [--limit N]      # updates dataset.jsonl (after 'all' without --cursor)
+  python main.py resolve                       # fetch merged PRs via GraphQL, build pairs
+  python main.py extract [--limit N]           # run extract only; writes extract_cache.json
+  python main.py apply-cursor [--limit N]      # run agent_change for pairs in extract_cache; updates extract_cache.json
+  python main.py build [--limit N]             # build dataset.jsonl from extract_cache.json
+  python main.py all [--limit N]               # resolve + extract + build (no cursor)
 """
 
 import argparse
@@ -15,18 +15,16 @@ import os
 import subprocess
 import sys
 
-from params import GITHUB_OWNER, GITHUB_REPO, REPO_URL
+from params import GITHUB_REPO, REPO_URL
 
 WORK_DIR = GITHUB_REPO
 from features.build_dataset import (
     get_pairs_from_resolve,
     build_one_row,
-    get_cache_path,
     get_cache_dir,
     get_extract_cache_path,
     load_extract_cache,
     save_extract_cache,
-    get_extract_entry,
     cursor_branches_exist,
 )
 
@@ -70,62 +68,6 @@ def run_agent_change(repo_url, issue_id, pr_id, h, project_root):
 DATASET_DEFAULT = "dataset.jsonl"
 
 
-def do_build(args, pairs):
-    repo_url = REPO_URL
-    cache_dir = getattr(args, "cache_dir", None)
-    extract_cache = load_extract_cache(PROJECT_ROOT, cache_dir)
-    failed = []
-    out_path = getattr(args, "out", DATASET_DEFAULT)
-    with open(out_path, "w") as out:
-        for i, p in enumerate(pairs):
-            issue_id = p.get("issue_id")
-            pr_id = p.get("pr_id")
-            if issue_id is None or pr_id is None:
-                failed.append((issue_id, pr_id, "missing issue_id or pr_id"))
-                continue
-            print(f"[{i+1}/{len(pairs)}] issue={issue_id} pr={pr_id} ...", flush=True)
-            extract_data, err = run_extract(repo_url, issue_id, pr_id, PROJECT_ROOT)
-            if err:
-                print(f"  extract failed: {err}", flush=True)
-                failed.append((issue_id, pr_id, err))
-                continue
-            cached = get_extract_entry(extract_cache, issue_id, pr_id)
-            if cached:
-                base_hash = cached.get("base_hash")
-                human_hash = cached.get("human_hash")
-            else:
-                base_hash = extract_data.get("base_hash")
-                human_hash = extract_data.get("human_hash")
-                branches = extract_data.get("branches", {})
-                if base_hash and human_hash:
-                    extract_cache = extract_cache or []
-                    extract_cache.append({"issue_id": issue_id, "pr_id": pr_id, "base_hash": base_hash, "human_hash": human_hash, "branches": branches})
-                    save_extract_cache(PROJECT_ROOT, extract_cache, cache_dir)
-            h = base_hash[:8] if base_hash else None
-            if getattr(args, "cursor", False) and h:
-                agent_err = run_agent_change(repo_url, issue_id, pr_id, h, PROJECT_ROOT)
-                if agent_err:
-                    print(f"  agent_change failed: {agent_err}", flush=True)
-                    failed.append((issue_id, pr_id, agent_err))
-                    continue
-            row, row_err = build_one_row(PROJECT_ROOT, issue_id, pr_id, base_hash, human_hash)
-            if row_err:
-                print(f"  build row failed: {row_err}", flush=True)
-                failed.append((issue_id, pr_id, row_err))
-                continue
-            out.write(json.dumps(row, ensure_ascii=False) + "\n")
-            out.flush()
-            print("  ok", flush=True)
-    print(f"Wrote {args.out}. Failed: {len(failed)}")
-    if failed:
-        for issue_id, pr_id, err in failed[:20]:
-            print(f"  issue={issue_id} pr={pr_id}: {err}")
-        if len(failed) > 20:
-            print(f"  ... and {len(failed) - 20} more")
-    if failed:
-        sys.exit(1)
-
-
 def main():
     ap = argparse.ArgumentParser(description="Flask changelog dataset pipeline.")
     ap.add_argument("--cache-dir", default=None, metavar="DIR", help="Directory for cache files (default: <project_root>/<reponame>_cache)")
@@ -137,16 +79,14 @@ def main():
     p_extract = sub.add_parser("extract", help="Run extract only for each pair, write extract cache. Pairs from cache or run resolve if missing.")
     p_extract.add_argument("--limit", type=int, default=None, help="Max pairs to process")
 
-    p_build = sub.add_parser("build", help="Run extract + diffs for each pair, write JSONL. Pairs from cache or run resolve if missing.")
-    p_build.add_argument("--cursor", action="store_true", help="Run Cursor agent during extract")
-    p_build.add_argument("--limit", type=int, default=None, help="Max pairs to process")
+    p_build = sub.add_parser("build", help="Build dataset.jsonl strictly from extract_cache.json (no extract runs).")
+    p_build.add_argument("--limit", type=int, default=None, help="Max entries to process")
 
-    p_all = sub.add_parser("all", help="Resolve pairs then build dataset. Pairs from cache or run resolve if missing.")
-    p_all.add_argument("--cursor", action="store_true", help="Run Cursor agent during extract")
+    p_all = sub.add_parser("all", help="Resolve pairs, extract, then build dataset.")
     p_all.add_argument("--limit", type=int, default=None, help="Max pairs to process")
 
-    p_apply_cursor = sub.add_parser("apply-cursor", help="Apply cursor (agent_change) to dataset rows; use after 'all' without --cursor")
-    p_apply_cursor.add_argument("--limit", type=int, default=None, help="Max pairs to process (default: all in dataset)")
+    p_apply_cursor = sub.add_parser("apply-cursor", help="Run agent_change for pairs in extract_cache; updates extract_cache.json with cursor hashes.")
+    p_apply_cursor.add_argument("--limit", type=int, default=None, help="Max pairs to process")
 
     args = ap.parse_args()
     cache_dir = getattr(args, "cache_dir", None)
@@ -180,10 +120,9 @@ def main():
                 failed.append((issue_id, pr_id, err))
                 continue
             base_hash = extract_data.get("base_hash")
-            human_hash = extract_data.get("human_hash")
-            branches = extract_data.get("branches", {})
-            extract_entries.append({"issue_id": issue_id, "pr_id": pr_id, "base_hash": base_hash, "human_hash": human_hash, "branches": branches})
-            print("Extract Success", flush=True)
+            merge_hash = extract_data.get("merge_hash")
+            extract_entries.append({"issue_id": issue_id, "pr_id": pr_id, "base_hash": base_hash, "merge_hash": merge_hash, "branches": extract_data.get("branches")})
+            print("  extract ok", flush=True)
         save_extract_cache(PROJECT_ROOT, extract_entries, cache_dir)
         print(f"Wrote {get_extract_cache_path(PROJECT_ROOT, cache_dir)}. Failed: {len(failed)}")
         if failed:
@@ -194,48 +133,132 @@ def main():
             sys.exit(1)
 
     elif args.cmd == "build":
-        pairs = get_pairs_from_resolve(PROJECT_ROOT, cache_dir)
+        extract_cache = load_extract_cache(PROJECT_ROOT, cache_dir)
+        if not extract_cache:
+            print("ERROR: No extract cache found. Run 'main extract' first.", file=sys.stderr)
+            sys.exit(1)
+        entries = extract_cache
         if args.limit is not None:
-            pairs = pairs[: args.limit]
-        do_build(args, pairs)
+            entries = entries[: args.limit]
+        failed = []
+        out_path = DATASET_DEFAULT
+        with open(out_path, "w") as out:
+            for i, entry in enumerate(entries):
+                issue_id = entry.get("issue_id")
+                pr_id = entry.get("pr_id")
+                base_hash = entry.get("base_hash")
+                merge_hash = entry.get("merge_hash") or entry.get("human_hash")
+                if issue_id is None or pr_id is None or not base_hash or not merge_hash:
+                    failed.append((issue_id, pr_id, "incomplete cache entry"))
+                    continue
+                print(f"[{i+1}/{len(entries)}] issue={issue_id} pr={pr_id} ...", flush=True)
+                row, row_err = build_one_row(PROJECT_ROOT, issue_id, pr_id, base_hash, merge_hash)
+                if row_err:
+                    print(f"  build row failed: {row_err}", flush=True)
+                    failed.append((issue_id, pr_id, row_err))
+                    continue
+                out.write(json.dumps(row, ensure_ascii=False) + "\n")
+                out.flush()
+                print("  ok", flush=True)
+        print(f"Wrote {out_path}. Failed: {len(failed)}")
+        if failed:
+            for issue_id, pr_id, err in failed[:20]:
+                print(f"  issue={issue_id} pr={pr_id}: {err}")
+            if len(failed) > 20:
+                print(f"  ... and {len(failed) - 20} more")
+        if failed:
+            sys.exit(1)
 
     elif args.cmd == "all":
+        # resolve (if needed) -> extract -> build
+        pairs_path = os.path.join(get_cache_dir(PROJECT_ROOT, cache_dir), "pairs.json")
+        if not os.path.isfile(pairs_path):
+            print("Running resolve first...", flush=True)
+            script = os.path.join(PROJECT_ROOT, "features", "resolve_pairs.py")
+            cache_dir_path = get_cache_dir(PROJECT_ROOT, cache_dir)
+            cmd = [sys.executable, script, "--json", "--cache", cache_dir_path]
+            run_cmd(cmd)
+        # extract
         pairs = get_pairs_from_resolve(PROJECT_ROOT, cache_dir)
         if args.limit is not None:
             pairs = pairs[: args.limit]
-        do_build(args, pairs)
+        repo_url = REPO_URL
+        extract_entries = []
+        failed = []
+        for i, p in enumerate(pairs):
+            issue_id = p.get("issue_id")
+            pr_id = p.get("pr_id")
+            if issue_id is None or pr_id is None:
+                failed.append((issue_id, pr_id, "missing issue_id or pr_id"))
+                continue
+            print(f"[{i+1}/{len(pairs)}] issue={issue_id} pr={pr_id} ...", flush=True)
+            extract_data, err = run_extract(repo_url, issue_id, pr_id, PROJECT_ROOT)
+            if err:
+                print(f"  extract failed: {err}", flush=True)
+                failed.append((issue_id, pr_id, err))
+                continue
+            base_hash = extract_data.get("base_hash")
+            merge_hash = extract_data.get("merge_hash")
+            extract_entries.append({"issue_id": issue_id, "pr_id": pr_id, "base_hash": base_hash, "merge_hash": merge_hash, "branches": extract_data.get("branches")})
+            print("  extract ok", flush=True)
+        save_extract_cache(PROJECT_ROOT, extract_entries, cache_dir)
+        if failed:
+            print(f"Extract phase: {len(failed)} failures")
+            for issue_id, pr_id, err in failed[:20]:
+                print(f"  issue={issue_id} pr={pr_id}: {err}")
+        # build
+        build_failed = []
+        out_path = DATASET_DEFAULT
+        with open(out_path, "w") as out:
+            for i, entry in enumerate(extract_entries):
+                issue_id = entry.get("issue_id")
+                pr_id = entry.get("pr_id")
+                base_hash = entry.get("base_hash")
+                merge_hash = entry.get("merge_hash")
+                if not base_hash or not merge_hash:
+                    build_failed.append((issue_id, pr_id, "missing hashes"))
+                    continue
+                print(f"[build {i+1}/{len(extract_entries)}] issue={issue_id} pr={pr_id} ...", flush=True)
+                row, row_err = build_one_row(PROJECT_ROOT, issue_id, pr_id, base_hash, merge_hash)
+                if row_err:
+                    print(f"  build row failed: {row_err}", flush=True)
+                    build_failed.append((issue_id, pr_id, row_err))
+                    continue
+                out.write(json.dumps(row, ensure_ascii=False) + "\n")
+                out.flush()
+                print("  ok", flush=True)
+        print(f"Wrote {out_path}. Build failures: {len(build_failed)}")
+        if build_failed:
+            for issue_id, pr_id, err in build_failed[:20]:
+                print(f"  issue={issue_id} pr={pr_id}: {err}")
 
     elif args.cmd == "apply-cursor":
-        dataset_path = DATASET_DEFAULT
-        if not os.path.isfile(dataset_path):
-            print(f"ERROR: Dataset file not found: {dataset_path}", file=sys.stderr)
-            print("Run 'main all' (without --cursor) first to create the dataset.", file=sys.stderr)
+        extract_cache = load_extract_cache(PROJECT_ROOT, cache_dir)
+        if not extract_cache:
+            print("ERROR: No extract cache found. Run 'main extract' first.", file=sys.stderr)
             sys.exit(1)
-        with open(dataset_path) as f:
-            rows = [json.loads(line) for line in f if line.strip()]
-        if not rows:
-            print("Dataset is empty. Nothing to apply.", file=sys.stderr)
-            sys.exit(0)
         work_dir = os.path.join(PROJECT_ROOT, WORK_DIR)
         has_cursor = []
         no_cursor = []
-        for row in rows:
-            issue_id = row.get("issue_id")
-            pr_id = row.get("pr_id")
-            base_hash = row.get("base_hash")
-            human_hash = row.get("human_hash")
+        for entry in extract_cache:
+            issue_id = entry.get("issue_id")
+            pr_id = entry.get("pr_id")
+            base_hash = entry.get("base_hash")
             if issue_id is None or pr_id is None or not base_hash:
                 continue
             h = base_hash[:8]
-            if cursor_branches_exist(work_dir, h):
-                has_cursor.append((row, issue_id, pr_id, base_hash, human_hash, h))
+            branches = entry.get("branches") or {}
+            if isinstance(branches, dict) and branches.get(f"{h}-cursor") and branches.get(f"{h}-cursor-creative"):
+                has_cursor.append(entry)
+            elif cursor_branches_exist(work_dir, h):
+                has_cursor.append(entry)
             else:
-                no_cursor.append((row, issue_id, pr_id, base_hash, human_hash, h))
-        if not no_cursor and not has_cursor:
-            no_cursor = [(row, row.get("issue_id"), row.get("pr_id"), row.get("base_hash"), row.get("human_hash"), (row.get("base_hash") or "")[:8]) for row in rows if row.get("issue_id") is not None and row.get("pr_id") is not None and row.get("base_hash")]
-        if len(has_cursor) == len(rows) and has_cursor:
-            print("Cursor changes already applied for all pairs.")
+                no_cursor.append(entry)
+
+        if not no_cursor and has_cursor:
+            print(f"Cursor changes already applied for all {len(has_cursor)} pair(s).")
             sys.exit(0)
+
         if has_cursor and no_cursor:
             print(f"{len(has_cursor)} pair(s) already have cursor applied. {len(no_cursor)} pair(s) do not.")
             try:
@@ -245,29 +268,62 @@ def main():
             if reply != "y":
                 print("Exiting without changes.")
                 sys.exit(0)
-            to_apply = no_cursor
-        else:
-            to_apply = no_cursor
+
+        to_apply = no_cursor
         if getattr(args, "limit", None) is not None:
             to_apply = to_apply[: args.limit]
+
         repo_url = REPO_URL
-        for row, issue_id, pr_id, base_hash, human_hash, h in to_apply:
-            print(f"Applying cursor: issue={issue_id} pr={pr_id} ...", flush=True)
+        # Build a lookup for fast entry updates
+        entry_lookup = {}
+        for entry in extract_cache:
+            key = (entry.get("issue_id"), entry.get("pr_id"))
+            entry_lookup[key] = entry
+
+        for i, entry in enumerate(to_apply):
+            issue_id = entry.get("issue_id")
+            pr_id = entry.get("pr_id")
+            base_hash = entry.get("base_hash")
+            h = base_hash[:8]
+            print(f"[{i+1}/{len(to_apply)}] Applying cursor: issue={issue_id} pr={pr_id} ...", flush=True)
             agent_err = run_agent_change(repo_url, issue_id, pr_id, h, PROJECT_ROOT)
             if agent_err:
                 print(f"  agent_change failed: {agent_err}", flush=True)
                 continue
-            new_row, row_err = build_one_row(PROJECT_ROOT, issue_id, pr_id, base_hash, human_hash)
-            if row_err:
-                print(f"  build row failed: {row_err}", flush=True)
-                continue
-            row["cursor_diff"] = new_row.get("cursor_diff", "")
-            row["cursor_creative_diff"] = new_row.get("cursor_creative_diff", "")
-            print("  ok", flush=True)
-        with open(dataset_path, "w") as f:
-            for r in rows:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        print(f"Updated {dataset_path}.")
+            # Resolve cursor branch SHAs
+            cursor_hash = None
+            cursor_creative_hash = None
+            try:
+                r = subprocess.run(
+                    ["git", "rev-parse", f"{h}-cursor"],
+                    cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                if r.returncode == 0:
+                    cursor_hash = r.stdout.strip()
+            except Exception:
+                pass
+            try:
+                r = subprocess.run(
+                    ["git", "rev-parse", f"{h}-cursor-creative"],
+                    cwd=work_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                if r.returncode == 0:
+                    cursor_creative_hash = r.stdout.strip()
+            except Exception:
+                pass
+            # Update the entry in the cache: add cursor branches to branches dict
+            key = (issue_id, pr_id)
+            if key in entry_lookup:
+                ent = entry_lookup[key]
+                branches = ent.get("branches")
+                if isinstance(branches, dict):
+                    branches[f"{h}-cursor"] = cursor_hash
+                    branches[f"{h}-cursor-creative"] = cursor_creative_hash
+            print(f"  ok (cursor={cursor_hash}, creative={cursor_creative_hash})", flush=True)
+
+        save_extract_cache(PROJECT_ROOT, extract_cache, cache_dir)
+        cache_path = get_extract_cache_path(PROJECT_ROOT, cache_dir)
+        print(f"Updated {cache_path}.")
 
 
 if __name__ == "__main__":

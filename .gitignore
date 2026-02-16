@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 .DS_Store
+# Pipeline output
+dataset.jsonl
+pairs.json
+data/
+# Cache directory (resolve_cache.json + extract_cache.json; default: <reponame>_cache/)
+*_cache/
